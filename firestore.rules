@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function signed(){return request.auth!=null;}
+  function account(){return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;}
+  function admin(){return signed()&&account().get('role','user') in ['admin','superadmin'];}
+  function editor(kind){return admin()||(signed()&&account().get('role','user')==kind+'_editor');}
+  function bounded(){return request.query.limit!=null&&request.query.limit<=100;}
+  function subscriber(){
+   let p=get(/databases/$(database)/documents/users/$(request.auth.uid)/private/account).data;
+   return p.get('subscriptionTier','free') in ['pro','elite','vip','creator','business']&&
+    (p.get('subscriptionValidUntil',null)==null||p.subscriptionValidUntil>request.time.toMillis())&&
+    (p.get('subscriptionExpiresAt',null)==null||p.subscriptionExpiresAt>request.time.toMillis());
+  }
+  function designer(){let a=account();return a.get('isDesigner',false)==true&&a.get('designerVerificationStatus','')=='approved'&&a.get('designerId','')!=''&&get(/databases/$(database)/documents/designers/$(a.designerId)).data.get('linkedUserId','')==request.auth.uid;}
+  function premium(){return signed()&&(admin()||subscriber()||designer());}
+  function postAccess(p){return p.get('isClosed',true)==false||(signed()&&p.userId==request.auth.uid)||premium();}
+  function parentPost(id){return postAccess(get(/databases/$(database)/documents/feedPosts/$(id)).data);}
+  function conversation(id){return signed()&&(admin()||request.auth.uid in get(/databases/$(database)/documents/conversations/$(id)).data.participants);}
+  match /{document=**}{allow read,write:if false;}
+  // Identity form bodies, file metadata, and cleanup jobs are server-only.
+  match /identityRecords/{key}{allow read,write:if false;}
+  // Admin SDK API is the sole writer. All legacy browser write paths are denied.
+  match /publicProfiles/{uid}{allow get:if true;allow list:if bounded();}
+  match /users/{uid}{allow get:if signed()&&(request.auth.uid==uid||admin());allow list:if admin()&&bounded();
+   match /private/{key}{allow get:if key=='account'&&signed()&&(request.auth.uid==uid||admin());}
+  }
+  match /feedPosts/{key}{allow get:if postAccess(resource.data);allow list:if bounded()&&postAccess(resource.data);}
+  match /feedComments/{key}{allow get:if (signed()&&resource.data.userId==request.auth.uid)||parentPost(resource.data.postId);allow list:if bounded()&&((signed()&&resource.data.userId==request.auth.uid)||parentPost(resource.data.postId));}
+  match /feedLikes/{key}{allow get:if signed()&&(resource.data.userId==request.auth.uid||admin());allow list:if bounded()&&signed()&&(resource.data.userId==request.auth.uid||admin());}
+  match /feedLiveMessages/{key}{allow get:if resource.data.channel=='public'||premium();allow list:if bounded()&&(resource.data.channel=='public'||premium());}
+  match /liveMessages/{key}{allow get:if signed();allow list:if signed()&&bounded();}
+  match /conversations/{key}{allow get:if signed()&&(request.auth.uid in resource.data.participants||admin());allow list:if bounded()&&signed()&&(request.auth.uid in resource.data.participants||(exists(/databases/$(database)/documents/_system/profileSeparationV1)&&request.auth.uid in resource.data.get('unreadFor',[]))||admin());
+   match /messages/{message}{allow get:if conversation(key);allow list:if bounded()&&conversation(key);}
+  }
+  match /notifications/{key}{allow get:if signed()&&(resource.data.userId==request.auth.uid||admin());allow list:if bounded()&&signed()&&(resource.data.userId==request.auth.uid||admin());}
+  match /agency_invitations/{key}{allow get:if signed()&&(admin()||resource.data.modelUserId==request.auth.uid||resource.data.invitedByUserId==request.auth.uid);allow list:if bounded()&&signed()&&(admin()||resource.data.modelUserId==request.auth.uid||resource.data.invitedByUserId==request.auth.uid);}
+  match /agency_broadcasts/{key}{allow get:if signed()&&(admin()||resource.data.senderUserId==request.auth.uid||request.auth.uid in resource.data.recipientUserIds);allow list:if bounded()&&signed()&&(admin()||resource.data.senderUserId==request.auth.uid||request.auth.uid in resource.data.recipientUserIds);}
+  match /{col}/{key}{
+   allow get:if col in ['events','news','designers','education','agencies','sponsors','settings','siteSettings','ffAiKnowledge'];
+   allow list:if bounded()&&col in ['events','news','designers','education','agencies','sponsors','settings','siteSettings','ffAiKnowledge'];
+   allow get:if col in ['needleApplications','transactions']&&signed()&&(resource.data.userId==request.auth.uid||admin());
+   allow list:if bounded()&&col in ['needleApplications','transactions']&&signed()&&(resource.data.userId==request.auth.uid||admin());
+   allow get:if col in ['tickets','giveaway_entries']&&signed()&&(editor('ticket')||resource.data.userId==request.auth.uid);
+   allow list:if bounded()&&col in ['tickets','giveaway_entries']&&signed()&&(editor('ticket')||resource.data.userId==request.auth.uid);
+   allow get:if col in ['subscribers','sponsorships','businessInquiries']&&editor('content');
+   allow list:if bounded()&&col in ['subscribers','sponsorships','businessInquiries']&&editor('content');
+  }
+  match /vacancies/{key}{allow get:if true;allow list:if bounded();}
+  match /jobApplications/{key}{allow get:if signed()&&(admin()||resource.data.userId==request.auth.uid||resource.data.employerId==request.auth.uid);allow list:if bounded()&&signed()&&(admin()||resource.data.userId==request.auth.uid||resource.data.employerId==request.auth.uid);}
+  match /posts/{key}{allow get:if signed();allow list:if signed()&&bounded();}
+  match /admin_invites/{email}{allow get:if signed()&&(admin()||(request.auth.token.get('email_verified',false)&&request.auth.token.get('email','').lower()==email.lower()));allow list:if admin()&&bounded();}
+ }
+}
